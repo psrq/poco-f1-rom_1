@@ -9,78 +9,146 @@ on:
 jobs:
   download_and_upload:
     runs-on: ubuntu-latest
+    timeout-minutes: 350
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Download ROM
+      - name: Install aria2
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y aria2
+
+      - name: Download ROM (parallel, auto-mirror)
         run: |
           set -euo pipefail
-          URL="https://bigota.d.miui.com/V12.0.3.0.QEJRUXM/miui_POCOF1RUGlobal_V12.0.3.0.QEJRUXM_ac5b1649fc_10.0.zip"
           FILE="miui_POCOF1RUGlobal_V12.0.3.0.QEJRUXM_ac5b1649fc_10.0.zip"
 
-          echo "Скачиваем: $URL"
-          curl -L --fail --retry 5 --retry-delay 5 --retry-all-errors \
-               --connect-timeout 30 \
-               -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
-               -e "https://miui.com/" \
-               -o "$FILE" \
-               "$URL"
+          # Список зеркал Xiaomi — пробуем по очереди, берём самое быстрое
+          MIRRORS=(
+            "https://cdnorg.d.miui.com/V12.0.3.0.QEJRUXM/${FILE}"
+            "https://bn.d.miui.com/V12.0.3.0.QEJRUXM/${FILE}"
+            "https://bigota.d.miui.com/V12.0.3.0.QEJRUXM/${FILE}"
+            "https://hugeota.d.miui.com/V12.0.3.0.QEJRUXM/${FILE}"
+          )
 
-          echo "Проверяем размер:"
-          ls -lh "$FILE"
-          SIZE=$(stat -c%s "$FILE")
-          echo "Размер в байтах: $SIZE"
+          UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
-          # Защита от HTML-заглушки
-          if [ "$SIZE" -lt 100000000 ]; then
-            echo "❌ Файл слишком маленький — это не ROM"
-            head -c 300 "$FILE" || true
+          echo "=== Проверяем доступность зеркал ==="
+          for m in "${MIRRORS[@]}"; do
+            code=$(curl -s -o /dev/null -w "%{http_code}" -I -L -A "$UA" "$m" || echo "000")
+            echo "  $code  $m"
+          done
+
+          echo ""
+          echo "=== Качаем через aria2c (16 соединений) ==="
+          DOWNLOADED=0
+          for m in "${MIRRORS[@]}"; do
+            echo ""
+            echo ">>> Пробуем: $m"
+            rm -f "$FILE" "$FILE.aria2"
+            if aria2c \
+                -x 16 -s 16 -k 1M \
+                --file-allocation=none \
+                --max-tries=5 --retry-wait=3 \
+                --connect-timeout=20 \
+                --timeout=60 \
+                --lowest-speed-limit=100K \
+                --user-agent="$UA" \
+                --referer="https://miui.com/" \
+                --summary-interval=15 \
+                --console-log-level=warn \
+                --allow-overwrite=true \
+                -o "$FILE" \
+                "$m"; then
+              SIZE=$(stat -c%s "$FILE" 2>/dev/null || echo 0)
+              if [ "$SIZE" -gt 100000000 ]; then
+                echo "✅ Скачано с $m — $SIZE байт"
+                DOWNLOADED=1
+                break
+              else
+                echo "⚠️  Файл слишком мал ($SIZE байт) — это не ROM, пробуем следующее зеркало"
+              fi
+            else
+              echo "❌ Не удалось скачать с $m"
+            fi
+          done
+
+          if [ "$DOWNLOADED" -ne 1 ]; then
+            echo "❌ Ни одно зеркало не сработало"
             exit 1
           fi
 
-          # GitHub Releases лимит: 2 GiB = 2147483648 байт
-          LIMIT=2147483648
-          if [ "$SIZE" -gt "$LIMIT" ]; then
-            echo "⚠️  Файл больше 2 GiB, разбиваем на части..."
-            split -b 1900M -d "$FILE" "${FILE}.part_"
-            rm -f "$FILE"
-            ls -lh "${FILE}".part_* > parts.txt
-            cat parts.txt
-          else
-            echo "✅ Файл влезает целиком"
-            echo "$FILE" > upload_files.txt
-          fi
+          echo ""
+          echo "=== Итог ==="
+          ls -lh "$FILE"
+          SHA=$(sha256sum "$FILE" | awk '{print $1}')
+          echo "$SHA" > "$FILE.sha256"
+          echo "SHA256: $SHA"
 
-      - name: Prepare file list for upload
+      - name: Split if > 2 GiB
+        id: split
         run: |
           set -euo pipefail
           FILE="miui_POCOF1RUGlobal_V12.0.3.0.QEJRUXM_ac5b1649fc_10.0.zip"
-          if [ -f "$FILE" ]; then
-            echo "$FILE" > upload_files.txt
-          else
+          SIZE=$(stat -c%s "$FILE")
+          LIMIT=2147483648   # 2 GiB — лимит GitHub Releases
+
+          if [ "$SIZE" -gt "$LIMIT" ]; then
+            echo "Файл $SIZE байт > 2 GiB → разбиваем"
+            split -b 1900M -d "$FILE" "${FILE}.part_"
+            rm -f "$FILE"
             ls -1 "${FILE}".part_* > upload_files.txt
+          else
+            echo "Файл $SIZE байт ≤ 2 GiB → заливаем целиком"
+            echo "$FILE" > upload_files.txt
           fi
-          echo "Файлы к загрузке:"
+
+          # Добавляем файл с хэшем
+          echo "$FILE.sha256" >> upload_files.txt
+          echo "Файлы для загрузки:"
           cat upload_files.txt
 
-      - name: Create Release and Upload Asset(s)
+      - name: Create Release and Upload
         uses: softprops/action-gh-release@v2
         with:
           tag_name: "v12.0.3.0"
-          name: "MIUI V12.0.3.0.QEJRUXM"
+          name: "MIUI V12.0.3.0.QEJRUXM (POCO F1)"
           body: |
-            Скачать прошивку: `miui_POCOF1RUGlobal_V12.0.3.0.QEJRUXM_ac5b1649fc_10.0.zip`
+            ## MIUI V12.0.3.0.QEJRUXM для POCO F1 (Global)
 
-            Если она загружена частями (`*.part_*`), собери её так:
+            Файл: `miui_POCOF1RUGlobal_V12.0.3.0.QEJRUXM_ac5b1649fc_10.0.zip`
+
+            ### Проверка целостности
+            Скачай файл `.sha256` и сверь хэш:
             ```
+            sha256sum -c miui_...zip.sha256
+            ```
+
+            ### Если прошивка загружена частями (`*.part_*`)
+            Собери её обратно одной командой:
+
+            **Linux / macOS:**
+            ```bash
             cat miui_*.zip.part_* > miui_POCOF1RUGlobal_V12.0.3.0.QEJRUXM_ac5b1649fc_10.0.zip
             ```
-            Проверить целостность (Linux/macOS):
-            ```
-            sha256sum miui_POCOF1RUGlobal_V12.0.3.0.QEJRUXM_ac5b1649fc_10.0.zip
+
+            **Windows (PowerShell):**
+            ```powershell
+            $parts = Get-ChildItem miui_*.zip.part_* | Sort-Object Name
+            $out = "miui_POCOF1RUGlobal_V12.0.3.0.QEJRUXM_ac5b1649fc_10.0.zip"
+            if (Test-Path $out) { Remove-Item $out }
+            foreach ($p in $parts) {
+              $bytes = [System.IO.File]::ReadAllBytes($p.FullName)
+              [System.IO.File]::OpenWrite($out).Close()
+              $fs = [System.IO.File]::Open($out, 'Append')
+              $fs.Write($bytes, 0, $bytes.Length)
+              $fs.Close()
+            }
             ```
           files: |
             ${{ github.workspace }}/upload_files.txt
+          fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
