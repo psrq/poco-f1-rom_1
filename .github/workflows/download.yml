@@ -59,16 +59,17 @@ jobs:
           fi
 
           echo ""
-          echo "=== Скачивание (по очереди, 16 соединений на зеркало) ==="
+          echo "=== Скачивание (по очереди с зеркал, 16 соединений) ==="
 
           OK=0
           for m in "${VALID[@]}"; do
             echo ""
-            echo ">>> $m"
+            echo ">>> Пробуем: $m"
+
             rm -f "$FILE" "${FILE}.aria2"
 
-            # ── ВАЖНО: set +e, потому что aria2c может вернуть не 0,
-            #    даже если файл скачан (exit 13 = часть соединений отвалилась).
+            # Отключаем set -e на время aria2c: exit code 13 = часть соединений отвалилась,
+            # НО файл может быть скачан полностью. Проверяем по факту, не по коду.
             set +e
             aria2c \
               -x 16 -s 16 -k 1M \
@@ -94,7 +95,6 @@ jobs:
 
             echo "aria2c exit code: $ARIA_EXIT"
 
-            # Проверяем не код возврата, а сам файл
             if [ ! -f "$FILE" ]; then
               echo "  ⚠️  Файл не создан — идём к следующему зеркалу"
               continue
@@ -109,11 +109,10 @@ jobs:
               continue
             fi
 
-            # Проверяем, что размер совпадает с ожидаемым из curl-разведки
+            # Сравниваем с ожидаемым Content-Length
             EXPECTED=$(curl -sIL -A "$UA" -e "$REF" "$m" | grep -i '^content-length:' | tail -1 | awk '{print $2}' | tr -d '\r' || true)
             if [ -n "$EXPECTED" ] && [ "$SIZE" != "$EXPECTED" ]; then
-              echo "  ⚠️  Размер не совпал: получено $SIZE, ожидалось $EXPECTED"
-              echo "  ⚠️  Возможно, докачка не завершена — пробуем другое зеркало"
+              echo "  ⚠️  Размер не совпал: получено $SIZE, ожидалось $EXPECTED — пробуем другое зеркало"
               rm -f "$FILE"
               continue
             fi
@@ -129,13 +128,14 @@ jobs:
           fi
 
           echo ""
-          echo "=== Итог ==="
+          echo "=== Итог скачивания ==="
           ls -lh "$FILE"
           SHA=$(sha256sum "$FILE" | awk '{print $1}')
           echo "$SHA" > "${FILE}.sha256"
           echo "SHA256: $SHA"
 
-      - name: Split if > 2 GiB
+      - name: Prepare file list
+        id: prep
         run: |
           set -euo pipefail
           FILE="miui_POCOF1RUGlobal_V12.0.3.0.QEJRUXM_ac5b1649fc_10.0.zip"
@@ -143,19 +143,27 @@ jobs:
           LIMIT=2147483648
 
           if [ "$SIZE" -gt "$LIMIT" ]; then
-            echo "Размер $SIZE > 2 GiB → split"
+            echo "Размер $SIZE > 2 GiB → split на части по 1900 MB"
             split -b 1900M -d "$FILE" "${FILE}.part_"
             rm -f "$FILE"
-            ls -1 "${FILE}".part_* > upload_files.txt
+            PARTS=$(ls -1 "${FILE}".part_*)
+            FILES="${PARTS}"$'\n'"${FILE}.sha256"
           else
-            echo "Размер $SIZE ≤ 2 GiB → целиком"
-            echo "$FILE" > upload_files.txt
+            echo "Размер $SIZE ≤ 2 GiB → заливаем целиком"
+            FILES="${FILE}"$'\n'"${FILE}.sha256"
           fi
 
-          echo "${FILE}.sha256" >> upload_files.txt
           echo ""
-          echo "=== К загрузке ==="
-          cat upload_files.txt
+          echo "=== Файлы к загрузке ==="
+          echo "$FILES"
+          echo "========================"
+
+          # Многострочный output для следующего шага
+          {
+            echo "files<<__EOF__"
+            echo "$FILES"
+            echo "__EOF__"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Create Release and Upload
         uses: softprops/action-gh-release@v2
@@ -194,8 +202,7 @@ jobs:
               $fs.Close()
             }
             ```
-          files: |
-            ${{ github.workspace }}/upload_files.txt
+          files: ${{ steps.prep.outputs.files }}
           fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
