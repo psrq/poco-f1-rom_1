@@ -27,6 +27,7 @@ jobs:
           UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
           REF="https://miui.com/"
 
+          # Все зеркала одного и того же файла — aria2c будет брать их как альтернативные источники
           MIRRORS=(
             "https://bigota.d.miui.com/V12.0.3.0.QEJRUXM/${FILE}"
             "https://cdnorg.d.miui.com/V12.0.3.0.QEJRUXM/${FILE}"
@@ -34,109 +35,91 @@ jobs:
             "https://hugeota.d.miui.com/V12.0.3.0.QEJRUXM/${FILE}"
           )
 
-          rm -f "$FILE" "$FILE.aria2"
-          OK=0
-
+          echo "=== Разведка зеркал (curl) ==="
+          VALID=()
           for m in "${MIRRORS[@]}"; do
-            echo ""
-            echo "════════════════════════════════════════════"
-            echo ">>> Зеркало: $m"
-            echo "════════════════════════════════════════════"
+            HDR=$(curl -sIL -A "$UA" -e "$REF" --connect-timeout 20 --max-time 45 "$m" 2>/dev/null || true)
+            CT=$(echo "$HDR" | grep -i '^content-type:' | tail -1 | awk '{print $2}' | tr -d '\r' || true)
+            CL=$(echo "$HDR" | grep -i '^content-length:' | tail -1 | awk '{print $2}' | tr -d '\r' || true)
 
-            # ── Шаг 1: разведка через curl (как у тебя раньше) ──
-            HEADERS=$(curl -sIL -A "$UA" -e "$REF" --connect-timeout 20 --max-time 60 "$m" || true)
-            CT=$(echo "$HEADERS" | grep -i '^content-type:' | tail -1 | awk '{print $2}' | tr -d '\r')
-            CL=$(echo "$HEADERS" | grep -i '^content-length:' | tail -1 | awk '{print $2}' | tr -d '\r')
-            FINAL=$(curl -sIL -A "$UA" -e "$REF" -o /dev/null -w '%{url_effective}' "$m" || true)
-
-            echo "  Content-Type   : $CT"
-            echo "  Content-Length : $CL"
-            echo "  Final URL      : $FINAL"
-
-            # Отсеиваем HTML-заглушки и 404
             if [[ -z "$CT" || "$CT" == *"html"* || "$CT" == *"text/"* ]]; then
-              echo "  ⚠️  Не бинарь (HTML/text) — пропускаем"
+              echo "  ❌ HTML/text ($CT) — $m"
               continue
             fi
             if [ -z "$CL" ] || [ "$CL" -lt 100000000 ]; then
-              echo "  ⚠️  Размер < 100 MB — пропускаем"
+              echo "  ❌ Слишком мал ($CL) — $m"
               continue
             fi
-
-            echo "  ✅ Зеркало валидное, ~$((CL/1024/1024)) MB"
-
-            # ── Шаг 2: aria2c на финальном URL (curl уже прошёл редиректы) ──
-            echo "  → aria2c (16 потоков)..."
-            if aria2c \
-                -x 16 -s 16 -k 1M \
-                --file-allocation=none \
-                --max-tries=5 --retry-wait=3 \
-                --connect-timeout=20 --timeout=60 \
-                --lowest-speed-limit=50K \
-                --user-agent="$UA" \
-                --referer="$REF" \
-                --header="Accept: */*" \
-                --summary-interval=15 \
-                --console-log-level=warn \
-                --allow-overwrite=true \
-                -o "$FILE" \
-                "$FINAL" ; then
-
-              SIZE=$(stat -c%s "$FILE" 2>/dev/null || echo 0)
-              if [ "$SIZE" -gt 100000000 ]; then
-                echo "  ✅ aria2c скачал: $SIZE байт"
-                OK=1
-                break
-              else
-                echo "  ⚠️  aria2c отдал $SIZE байт — не ROM, откат"
-                rm -f "$FILE"
-              fi
-            else
-              echo "  ⚠️  aria2c не смог — пробуем curl fallback"
-              rm -f "$FILE" "$FILE.aria2"
-            fi
-
-            # ── Шаг 3: fallback — curl с докачкой (то, что работало) ──
-            echo "  → curl fallback (resume, до 3 попыток)..."
-            for attempt in 1 2 3; do
-              echo "    попытка $attempt..."
-              if curl -L --fail --retry 5 --retry-delay 5 --retry-all-errors \
-                   -C - \
-                   -A "$UA" -e "$REF" \
-                   --connect-timeout 30 \
-                   -o "$FILE" \
-                   "$FINAL" ; then
-                break
-              fi
-              sleep 5
-            done
-
-            SIZE=$(stat -c%s "$FILE" 2>/dev/null || echo 0)
-            if [ "$SIZE" -gt 100000000 ]; then
-              echo "  ✅ curl скачал: $SIZE байт"
-              OK=1
-              break
-            fi
+            echo "  ✅ $((CL/1024/1024)) MB — $m"
+            VALID+=("$m")
           done
 
-          if [ "$OK" -ne 1 ]; then
-            echo "❌ Ни одно зеркало не сработало"
+          if [ "${#VALID[@]}" -eq 0 ]; then
+            echo "❌ Ни одно зеркало не отдало валидный ROM"
             exit 1
           fi
 
           echo ""
-          echo "═══ Итог ═══"
-          ls -lh "$FILE"
-          SHA=$(sha256sum "$FILE" | awk '{print $1}')
-          echo "$SHA" > "$FILE.sha256"
-          echo "SHA256: $SHA"
+          echo "=== Скачивание aria2c (мультизеркало, 16 соединений на источник) ==="
 
-          # Защита от мусора
-          SIZE=$(stat -c%s "$FILE")
-          if [ "$SIZE" -lt 100000000 ]; then
-            echo "❌ Итоговый файл слишком мал"
+          # Формируем input-файл для aria2c: одно имя → несколько URL
+          {
+            echo "${VALID[0]}"
+            echo "  out=${FILE}"
+            echo "  user-agent=${UA}"
+            echo "  referer=${REF}"
+            for ((i=1; i<${#VALID[@]}; i++)); do
+              echo "  ${VALID[$i]}"
+            done
+          } > aria2_input.txt
+
+          echo "--- aria2 input ---"
+          cat aria2_input.txt
+          echo "-------------------"
+
+          rm -f "$FILE" "$FILE.aria2"
+
+          aria2c \
+            -i aria2_input.txt \
+            -x 16 \
+            -s 16 \
+            -j 4 \
+            -k 1M \
+            --file-allocation=none \
+            --max-tries=0 \
+            --retry-wait=5 \
+            --connect-timeout=30 \
+            --timeout=120 \
+            --continue=true \
+            --allow-overwrite=true \
+            --auto-file-renaming=false \
+            --summary-interval=15 \
+            --console-log-level=warn \
+            --check-certificate=false \
+            --max-connection-per-server=16 \
+            --min-split-size=1M
+
+          echo ""
+          echo "=== Проверка файла ==="
+          ls -lh "$FILE"
+
+          if [ ! -f "$FILE" ]; then
+            echo "❌ Файл не создан"
             exit 1
           fi
+
+          SIZE=$(stat -c%s "$FILE")
+          echo "Размер: $SIZE байт"
+
+          if [ "$SIZE" -lt 100000000 ]; then
+            echo "❌ Файл подозрительно мал — это не ROM"
+            head -c 300 "$FILE" || true
+            exit 1
+          fi
+
+          SHA=$(sha256sum "$FILE" | awk '{print $1}')
+          echo "$SHA" > "${FILE}.sha256"
+          echo "SHA256: $SHA"
 
       - name: Split if > 2 GiB
         run: |
@@ -146,17 +129,18 @@ jobs:
           LIMIT=2147483648
 
           if [ "$SIZE" -gt "$LIMIT" ]; then
-            echo "Файл $SIZE байт > 2 GiB → split"
+            echo "Размер $SIZE > 2 GiB → split"
             split -b 1900M -d "$FILE" "${FILE}.part_"
             rm -f "$FILE"
             ls -1 "${FILE}".part_* > upload_files.txt
           else
-            echo "Файл $SIZE байт ≤ 2 GiB → целиком"
+            echo "Размер $SIZE ≤ 2 GiB → целиком"
             echo "$FILE" > upload_files.txt
           fi
 
-          echo "$FILE.sha256" >> upload_files.txt
-          echo "К загрузке:"
+          echo "${FILE}.sha256" >> upload_files.txt
+          echo ""
+          echo "=== К загрузке ==="
           cat upload_files.txt
 
       - name: Create Release and Upload
@@ -170,14 +154,18 @@ jobs:
             Файл: `miui_POCOF1RUGlobal_V12.0.3.0.QEJRUXM_ac5b1649fc_10.0.zip`
 
             ### Проверка целостности
-            ```
-            sha256sum -c miui_...zip.sha256
+
+            **Linux / macOS:**
+            ```bash
+            sha256sum -c miui_POCOF1RUGlobal_V12.0.3.0.QEJRUXM_ac5b1649fc_10.0.zip.sha256
             ```
 
             ### Если прошивка загружена частями (`*.part_*`)
+
             **Linux / macOS:**
             ```bash
             cat miui_*.zip.part_* > miui_POCOF1RUGlobal_V12.0.3.0.QEJRUXM_ac5b1649fc_10.0.zip
+            sha256sum -c miui_POCOF1RUGlobal_V12.0.3.0.QEJRUXM_ac5b1649fc_10.0.zip.sha256
             ```
 
             **Windows PowerShell:**
