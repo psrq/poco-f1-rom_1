@@ -15,9 +15,12 @@ jobs:
 
       - name: Download ROM from Xiaomi
         run: |
-          echo "Начинаем загрузку"
-          curl -L -o miui_POCOF1RUGlobal_V12.0.3.0.QEJRUXM_ac5b1649fc_10.0.zip "https://miui.com"
-          echo "Загрузка завершена! Проверяем реальный размер:"
+          echo "Скачиваем оригинальную прошивку с маскировкой под браузер..."
+          curl -L -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
+               -o miui_POCOF1RUGlobal_V12.0.3.0.QEJRUXM_ac5b1649fc_10.0.zip \
+               "https://miui.com"
+          
+          echo "Проверяем итоговый размер файла в консоли:"
           ls -lh miui_POCOF1RUGlobal_V12.0.3.0.QEJRUXM_ac5b1649fc_10.0.zip
 
       - name: Create Release and Upload Asset
