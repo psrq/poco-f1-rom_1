@@ -1,0 +1,24 @@
+name: Download ROM to Releases
+
+on:
+  workflow_dispatch:
+
+jobs:
+  download_and_upload:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download ROM from Xiaomi
+        run: |
+          curl -L -o miui_POCOF1RUGlobal_V12.0.3.0.QEJRUXM_ac5b1649fc_10.0.zip "https://miui.com"
+
+      - name: Create Release and Upload Asset
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "v12.0.3.0"
+          name: "MIUI V12.0.3.0.QEJRUXM"
+          files: miui_POCOF1RUGlobal_V12.0.3.0.QEJRUXM_ac5b1649fc_10.0.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
