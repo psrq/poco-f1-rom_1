@@ -15,10 +15,13 @@ jobs:
 
       - name: Download ROM from Xiaomi
         run: |
+          echo "Начинаем загрузку"
           curl -L -o miui_POCOF1RUGlobal_V12.0.3.0.QEJRUXM_ac5b1649fc_10.0.zip "https://miui.com"
+          echo "Загрузка завершена! Проверяем реальный размер:"
+          ls -lh miui_POCOF1RUGlobal_V12.0.3.0.QEJRUXM_ac5b1649fc_10.0.zip
 
       - name: Create Release and Upload Asset
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: "v12.0.3.0"
           name: "MIUI V12.0.3.0.QEJRUXM"
