@@ -59,72 +59,78 @@ jobs:
           fi
 
           echo ""
-          echo "=== Скачивание aria2c (мультизеркало, 16 соединений) ==="
+          echo "=== Скачивание (по очереди, 16 соединений на зеркало) ==="
 
-          # ── ФОРМАТ aria2c input-файла ──
-          # Первая строка — URL.
-          # Строки с отступом (2 пробела) — ОПЦИИ для этого URL (out=, user-agent= и т.п.).
-          # Последующие URL — АЛЬТЕРНАТИВНЫЕ ИСТОЧНИКИ того же файла (без отступа!).
-          # ВАЖНО: сначала все URL, затем опции — но aria2c парсит так:
-          #   URL
-          #     key=value
-          #   URL2
-          #   URL3
-          # Опции привязываются к текущему (последнему) URL. Чтобы зеркала работали,
-          # ставим главный URL первым, опции после него, потом остальные URL.
-          : > aria2_input.txt
-          echo "${VALID[0]}" >> aria2_input.txt
-          echo "  out=${FILE}" >> aria2_input.txt
-          echo "  user-agent=${UA}" >> aria2_input.txt
-          echo "  referer=${REF}" >> aria2_input.txt
-          for ((i=1; i<${#VALID[@]}; i++)); do
-            echo "${VALID[$i]}" >> aria2_input.txt
+          OK=0
+          for m in "${VALID[@]}"; do
+            echo ""
+            echo ">>> $m"
+            rm -f "$FILE" "${FILE}.aria2"
+
+            # ── ВАЖНО: set +e, потому что aria2c может вернуть не 0,
+            #    даже если файл скачан (exit 13 = часть соединений отвалилась).
+            set +e
+            aria2c \
+              -x 16 -s 16 -k 1M \
+              --file-allocation=none \
+              --max-tries=0 \
+              --retry-wait=5 \
+              --connect-timeout=30 \
+              --timeout=120 \
+              --continue=true \
+              --allow-overwrite=true \
+              --auto-file-renaming=false \
+              --summary-interval=15 \
+              --console-log-level=warn \
+              --check-certificate=false \
+              --max-connection-per-server=16 \
+              --min-split-size=1M \
+              -U "$UA" \
+              --referer="$REF" \
+              -o "$FILE" \
+              "$m"
+            ARIA_EXIT=$?
+            set -e
+
+            echo "aria2c exit code: $ARIA_EXIT"
+
+            # Проверяем не код возврата, а сам файл
+            if [ ! -f "$FILE" ]; then
+              echo "  ⚠️  Файл не создан — идём к следующему зеркалу"
+              continue
+            fi
+
+            SIZE=$(stat -c%s "$FILE" 2>/dev/null || echo 0)
+            echo "  Размер: $SIZE байт"
+
+            if [ "$SIZE" -lt 100000000 ]; then
+              echo "  ⚠️  Файл слишком мал — не ROM, пробуем следующее зеркало"
+              rm -f "$FILE"
+              continue
+            fi
+
+            # Проверяем, что размер совпадает с ожидаемым из curl-разведки
+            EXPECTED=$(curl -sIL -A "$UA" -e "$REF" "$m" | grep -i '^content-length:' | tail -1 | awk '{print $2}' | tr -d '\r' || true)
+            if [ -n "$EXPECTED" ] && [ "$SIZE" != "$EXPECTED" ]; then
+              echo "  ⚠️  Размер не совпал: получено $SIZE, ожидалось $EXPECTED"
+              echo "  ⚠️  Возможно, докачка не завершена — пробуем другое зеркало"
+              rm -f "$FILE"
+              continue
+            fi
+
+            echo "  ✅ Скачано успешно: $SIZE байт"
+            OK=1
+            break
           done
 
-          echo "--- aria2 input (cat -A, чтобы видеть отступы) ---"
-          cat -A aria2_input.txt
-          echo "--------------------------------------------------"
-
-          rm -f "$FILE" "$FILE.aria2"
-
-          aria2c \
-            -i aria2_input.txt \
-            -x 16 \
-            -s 16 \
-            -j 4 \
-            -k 1M \
-            --file-allocation=none \
-            --max-tries=0 \
-            --retry-wait=5 \
-            --connect-timeout=30 \
-            --timeout=120 \
-            --continue=true \
-            --allow-overwrite=true \
-            --auto-file-renaming=false \
-            --summary-interval=15 \
-            --console-log-level=warn \
-            --check-certificate=false \
-            --max-connection-per-server=16 \
-            --min-split-size=1M
+          if [ "$OK" -ne 1 ]; then
+            echo "❌ Ни одно зеркало не смогло скачать файл целиком"
+            exit 1
+          fi
 
           echo ""
-          echo "=== Проверка файла ==="
-          ls -lh "$FILE" || true
-
-          if [ ! -f "$FILE" ]; then
-            echo "❌ Файл не создан"
-            exit 1
-          fi
-
-          SIZE=$(stat -c%s "$FILE")
-          echo "Размер: $SIZE байт"
-
-          if [ "$SIZE" -lt 100000000 ]; then
-            echo "❌ Файл подозрительно мал — это не ROM"
-            head -c 300 "$FILE" || true
-            exit 1
-          fi
-
+          echo "=== Итог ==="
+          ls -lh "$FILE"
           SHA=$(sha256sum "$FILE" | awk '{print $1}')
           echo "$SHA" > "${FILE}.sha256"
           echo "SHA256: $SHA"
