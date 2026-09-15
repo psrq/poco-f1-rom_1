@@ -27,7 +27,6 @@ jobs:
           UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
           REF="https://miui.com/"
 
-          # Все зеркала одного и того же файла — aria2c будет брать их как альтернативные источники
           MIRRORS=(
             "https://bigota.d.miui.com/V12.0.3.0.QEJRUXM/${FILE}"
             "https://cdnorg.d.miui.com/V12.0.3.0.QEJRUXM/${FILE}"
@@ -60,22 +59,31 @@ jobs:
           fi
 
           echo ""
-          echo "=== Скачивание aria2c (мультизеркало, 16 соединений на источник) ==="
+          echo "=== Скачивание aria2c (мультизеркало, 16 соединений) ==="
 
-          # Формируем input-файл для aria2c: одно имя → несколько URL
-          {
-            echo "${VALID[0]}"
-            echo "  out=${FILE}"
-            echo "  user-agent=${UA}"
-            echo "  referer=${REF}"
-            for ((i=1; i<${#VALID[@]}; i++)); do
-              echo "  ${VALID[$i]}"
-            done
-          } > aria2_input.txt
+          # ── ФОРМАТ aria2c input-файла ──
+          # Первая строка — URL.
+          # Строки с отступом (2 пробела) — ОПЦИИ для этого URL (out=, user-agent= и т.п.).
+          # Последующие URL — АЛЬТЕРНАТИВНЫЕ ИСТОЧНИКИ того же файла (без отступа!).
+          # ВАЖНО: сначала все URL, затем опции — но aria2c парсит так:
+          #   URL
+          #     key=value
+          #   URL2
+          #   URL3
+          # Опции привязываются к текущему (последнему) URL. Чтобы зеркала работали,
+          # ставим главный URL первым, опции после него, потом остальные URL.
+          : > aria2_input.txt
+          echo "${VALID[0]}" >> aria2_input.txt
+          echo "  out=${FILE}" >> aria2_input.txt
+          echo "  user-agent=${UA}" >> aria2_input.txt
+          echo "  referer=${REF}" >> aria2_input.txt
+          for ((i=1; i<${#VALID[@]}; i++)); do
+            echo "${VALID[$i]}" >> aria2_input.txt
+          done
 
-          echo "--- aria2 input ---"
-          cat aria2_input.txt
-          echo "-------------------"
+          echo "--- aria2 input (cat -A, чтобы видеть отступы) ---"
+          cat -A aria2_input.txt
+          echo "--------------------------------------------------"
 
           rm -f "$FILE" "$FILE.aria2"
 
@@ -101,7 +109,7 @@ jobs:
 
           echo ""
           echo "=== Проверка файла ==="
-          ls -lh "$FILE"
+          ls -lh "$FILE" || true
 
           if [ ! -f "$FILE" ]; then
             echo "❌ Файл не создан"
