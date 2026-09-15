@@ -13,21 +13,74 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Download ROM from Xiaomi
+      - name: Download ROM
         run: |
-          echo "Скачиваем оригинальную прошивку с маскировкой под браузер..."
-          curl -L -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
-               -o miui_POCOF1RUGlobal_V12.0.3.0.QEJRUXM_ac5b1649fc_10.0.zip \
-               "https://miui.com"
-          
-          echo "Проверяем итоговый размер файла в консоли:"
-          ls -lh miui_POCOF1RUGlobal_V12.0.3.0.QEJRUXM_ac5b1649fc_10.0.zip
+          set -euo pipefail
+          URL="https://bigota.d.miui.com/V12.0.3.0.QEJRUXM/miui_POCOF1RUGlobal_V12.0.3.0.QEJRUXM_ac5b1649fc_10.0.zip"
+          FILE="miui_POCOF1RUGlobal_V12.0.3.0.QEJRUXM_ac5b1649fc_10.0.zip"
 
-      - name: Create Release and Upload Asset
+          echo "Скачиваем: $URL"
+          curl -L --fail --retry 5 --retry-delay 5 --retry-all-errors \
+               --connect-timeout 30 \
+               -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
+               -e "https://miui.com/" \
+               -o "$FILE" \
+               "$URL"
+
+          echo "Проверяем размер:"
+          ls -lh "$FILE"
+          SIZE=$(stat -c%s "$FILE")
+          echo "Размер в байтах: $SIZE"
+
+          # Защита от HTML-заглушки
+          if [ "$SIZE" -lt 100000000 ]; then
+            echo "❌ Файл слишком маленький — это не ROM"
+            head -c 300 "$FILE" || true
+            exit 1
+          fi
+
+          # GitHub Releases лимит: 2 GiB = 2147483648 байт
+          LIMIT=2147483648
+          if [ "$SIZE" -gt "$LIMIT" ]; then
+            echo "⚠️  Файл больше 2 GiB, разбиваем на части..."
+            split -b 1900M -d "$FILE" "${FILE}.part_"
+            rm -f "$FILE"
+            ls -lh "${FILE}".part_* > parts.txt
+            cat parts.txt
+          else
+            echo "✅ Файл влезает целиком"
+            echo "$FILE" > upload_files.txt
+          fi
+
+      - name: Prepare file list for upload
+        run: |
+          set -euo pipefail
+          FILE="miui_POCOF1RUGlobal_V12.0.3.0.QEJRUXM_ac5b1649fc_10.0.zip"
+          if [ -f "$FILE" ]; then
+            echo "$FILE" > upload_files.txt
+          else
+            ls -1 "${FILE}".part_* > upload_files.txt
+          fi
+          echo "Файлы к загрузке:"
+          cat upload_files.txt
+
+      - name: Create Release and Upload Asset(s)
         uses: softprops/action-gh-release@v2
         with:
           tag_name: "v12.0.3.0"
           name: "MIUI V12.0.3.0.QEJRUXM"
-          files: miui_POCOF1RUGlobal_V12.0.3.0.QEJRUXM_ac5b1649fc_10.0.zip
+          body: |
+            Скачать прошивку: `miui_POCOF1RUGlobal_V12.0.3.0.QEJRUXM_ac5b1649fc_10.0.zip`
+
+            Если она загружена частями (`*.part_*`), собери её так:
+            ```
+            cat miui_*.zip.part_* > miui_POCOF1RUGlobal_V12.0.3.0.QEJRUXM_ac5b1649fc_10.0.zip
+            ```
+            Проверить целостность (Linux/macOS):
+            ```
+            sha256sum miui_POCOF1RUGlobal_V12.0.3.0.QEJRUXM_ac5b1649fc_10.0.zip
+            ```
+          files: |
+            ${{ github.workspace }}/upload_files.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
